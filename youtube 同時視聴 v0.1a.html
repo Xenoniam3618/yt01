@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube 同時視聴コントローラー</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 16px;
+    }
+    table {
+      border-collapse: collapse;
+      margin-bottom: 12px;
+      width: 100%;
+      max-width: 800px;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 4px 8px;
+      font-size: 14px;
+    }
+    th {
+      background: #f3f3f3;
+    }
+    input[type="text"], input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .yt-wrapper {
+      display: inline-block;
+      margin: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>YouTube 同時視聴コントローラー</h1>
+  <p>
+    視聴したい YouTube 動画の URL と、再生開始秒を入力してください。<br>
+    「プレーヤーを読み込み」で埋め込みを作成し、「全動画を同時再生」で同期再生します。
+  </p>
+
+  <!-- 入力テーブル -->
+  <table id="videoTable">
+    <thead>
+      <tr>
+        <th style="width: 70%;">YouTube動画URL</th>
+        <th style="width: 20%;">開始秒</th>
+        <th style="width: 10%;">削除</th>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- 初期行（1行） -->
+      <tr>
+        <td><input type="text" placeholder="https://www.youtube.com/watch?v=XXXXX など"></td>
+        <td><input type="number" min="0" value="0"></td>
+        <td><button type="button" class="removeRow">×</button></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <button type="button" id="addRow">行を追加</button>
+  <button type="button" id="loadPlayers">プレーヤーを読み込み</button>
+  <button type="button" id="startAll">全動画を同時再生</button>
+
+<div style="margin-top: 8px; margin-bottom: 8px;">
+  <label>
+    全体の開始を戻す秒数:
+    <input type="number" id="globalOffset" min="0" value="0" style="width: 80px;">
+    秒
+  </label>
+  <span style="font-size: 12px; color: #555;">
+    （例：5 と入力すると、各動画の開始秒から5秒前にずらして再生）
+  </span>
+</div>
+
+  <hr>
+
+<h2>お気に入りセット管理</h2>
+
+<div>
+  <label>
+    セット選択:
+    <select id="setSelect">
+      <!-- JSから動的に生成 -->
+    </select>
+  </label>
+  <button type="button" id="addSet">新規セット追加</button>
+  <button type="button" id="deleteSet">選択セット削除</button>
+</div>
+<div style="margin-top: 4px;">
+  <button type="button" id="applySetToTable">選択セットをテーブルに反映</button>
+  <button type="button" id="updateSetFromTable">テーブル内容を選択セットに保存</button>
+</div>
+
+<hr>
+
+<h2>設定ファイル入出力</h2>
+<div>
+  <input type="file" id="configFileInput" accept=".json,application/json">
+  <button type="button" id="loadConfigFile">設定ファイル読み込み</button>
+</div>
+<div style="margin-top: 4px;">
+  <button type="button" id="saveConfigFile">現在の設定をファイル保存</button>
+</div>
+
+<hr>
+
+
+  <h2>プレーヤー領域</h2>
+  <div id="playersContainer">
+    <!-- ここにプレーヤーが動的に追加されます -->
+  </div>
+
+  <!-- YouTube IFrame API 読み込み -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script>
+    let isApiReady = false;
+    let players = [];            // YT.Player のインスタンス
+    let playerConfigs = [];      // { videoId, startSeconds }
+
+    // YouTube IFrame API 読み込み完了フラグ
+    function onYouTubeIframeAPIReady() {
+      isApiReady = true;
+      console.log('YouTube IFrame API ready');
+    }
+
+    // テーブルの行を追加
+    document.getElementById('addRow').addEventListener('click', () => {
+      const tbody = document.querySelector('#videoTable tbody');
+      const tr = document.createElement('tr');
+
+      tr.innerHTML = `
+        <td><input type="text" placeholder="https://www.youtube.com/watch?v=XXXXX など"></td>
+        <td><input type="number" min="0" value="0"></td>
+        <td><button type="button" class="removeRow">×</button></td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // 行削除（イベント委譲）
+    document.querySelector('#videoTable tbody').addEventListener('click', (e) => {
+      if (e.target.classList.contains('removeRow')) {
+        const tr = e.target.closest('tr');
+        const tbody = tr.parentNode;
+        // 行が1行しかない場合は消さないなど、好みで制御可能
+        if (tbody.rows.length > 1) {
+          tbody.removeChild(tr);
+        }
+      }
+    });
+
+    // URL から videoId を抽出する関数
+    function extractVideoId(url) {
+      if (!url) return null;
+
+      try {
+        // 短縮URLのようにスキーマ省略されている場合を考慮して補完
+        if (!/^https?:\/\//i.test(url)) {
+          url = 'https://' + url;
+        }
+        const u = new URL(url);
+
+        // 代表的なパターンに対応
+        // 1) https://www.youtube.com/watch?v=VIDEO_ID
+        if (u.hostname.includes('youtube.com')) {
+          if (u.searchParams.get('v')) {
+            return u.searchParams.get('v');
+          }
+          // 2) https://www.youtube.com/embed/VIDEO_ID
+          const paths = u.pathname.split('/');
+          const embedIndex = paths.indexOf('embed');
+          if (embedIndex !== -1 && paths[embedIndex + 1]) {
+            return paths[embedIndex + 1];
+          }
+        }
+
+        // 3) https://youtu.be/VIDEO_ID
+        if (u.hostname === 'youtu.be') {
+          const paths = u.pathname.split('/');
+          if (paths[1]) return paths[1];
+        }
+
+        return null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // フォームの内容からプレーヤーを再生成
+    document.getElementById('loadPlayers').addEventListener('click', () => {
+      if (!isApiReady) {
+        alert('YouTube IFrame API の読み込み中です。数秒後に再度お試しください。');
+        return;
+      }
+
+      // 既存プレーヤーの破棄
+      players.forEach(p => {
+        try {
+          p.destroy();
+        } catch (e) {}
+      });
+      players = [];
+      playerConfigs = [];
+
+      const tbody = document.querySelector('#videoTable tbody');
+      const rows = Array.from(tbody.rows);
+
+      const newConfigs = [];
+
+      rows.forEach((tr) => {
+        const urlInput = tr.cells[0].querySelector('input[type="text"]');
+        const startInput = tr.cells[1].querySelector('input[type="number"]');
+
+        const url = urlInput.value.trim();
+        if (!url) return;  // 空行は無視
+
+        const videoId = extractVideoId(url);
+        const startSeconds = parseInt(startInput.value || '0', 10) || 0;
+
+        if (!videoId) {
+          alert('URL から動画IDを取得できませんでした: ' + url);
+          return;
+        }
+
+        newConfigs.push({ videoId, startSeconds });
+      });
+
+      if (newConfigs.length === 0) {
+        alert('有効な動画URLが入力されていません。');
+        return;
+      }
+
+      playerConfigs = newConfigs;
+
+      const container = document.getElementById('playersContainer');
+      container.innerHTML = '';  // プレーヤー領域をクリア
+
+      // プレーヤー用の div を追加しつつ YT.Player を生成
+      playerConfigs.forEach((cfg, index) => {
+        const divId = 'player_' + index;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'yt-wrapper';
+        wrapper.innerHTML = `<div id="${divId}"></div>`;
+        container.appendChild(wrapper);
+
+        // プレーヤー生成
+        const player = new YT.Player(divId, {
+          height: '180',
+          width: '320',
+          videoId: cfg.videoId,
+          playerVars: {
+            playsinline: 1
+          },
+          events: {
+            onReady: (event) => {
+              // 指定秒数から再生できるようにキュー
+              event.target.cueVideoById({
+                videoId: cfg.videoId,
+                startSeconds: cfg.startSeconds
+              });
+            }
+          }
+        });
+
+        players.push(player);
+      });
+
+      alert('プレーヤーを読み込みました。必要であればスクロールしてプレーヤーを確認してください。');
+    });
+
+    // 全動画同時再生
+ document.getElementById('startAll').addEventListener('click', () => {
+  if (players.length === 0) {
+    alert('まず「プレーヤーを読み込み」を押してください。');
+    return;
+  }
+
+  const offset = getGlobalOffsetSeconds(); // ここでオフセット取得
+
+  players.forEach((player, index) => {
+    const cfg = playerConfigs[index];
+    if (!player || !cfg) return;
+
+    // 実際の開始秒 = 登録された開始秒 − オフセット（0未満にならないように補正）
+    const actualStart = Math.max(cfg.startSeconds - offset, 0);
+
+    try {
+      player.seekTo(actualStart, true);
+      player.playVideo();
+    } catch (e) {
+      console.error(e);
+    }
+  });
+});
+  </script>
+
+<script>
+let configData = {
+  version: 1,
+  sets: []
+};
+let currentSetId = null;
+
+// セット選択プルダウンの再描画
+function refreshSetSelectOptions() {
+  const select = document.getElementById('setSelect');
+  select.innerHTML = '';
+
+  configData.sets.forEach(set => {
+    const opt = document.createElement('option');
+    opt.value = set.id;
+    opt.textContent = set.name;
+    select.appendChild(opt);
+  });
+
+  // currentSetId が存在しなければ先頭を選択
+  if (configData.sets.length > 0) {
+    if (!currentSetId || !configData.sets.find(s => s.id === currentSetId)) {
+      currentSetId = configData.sets[0].id;
+    }
+    select.value = currentSetId;
+  } else {
+    currentSetId = null;
+  }
+}
+
+// セットIDからセットオブジェクトを取得
+function getCurrentSet() {
+  if (!currentSetId) return null;
+  return configData.sets.find(s => s.id === currentSetId) || null;
+}
+
+// セットをテーブルに反映
+function applyCurrentSetToTable() {
+  const set = getCurrentSet();
+  if (!set) {
+    alert('セットが選択されていません。');
+    return;
+  }
+
+  const tbody = document.querySelector('#videoTable tbody');
+  tbody.innerHTML = '';
+
+  set.items.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="text" value="${item.url}"></td>
+      <td><input type="number" min="0" value="${item.startSeconds}"></td>
+      <td><button type="button" class="removeRow">×</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  // もしセットが空なら、最低1行は作っておく
+  if (set.items.length === 0) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><input type="text" placeholder="https://www.youtube.com/watch?v=XXXXX など"></td>
+      <td><input type="number" min="0" value="0"></td>
+      <td><button type="button" class="removeRow">×</button></td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+// テーブル内容を現在セットに保存
+function updateCurrentSetFromTable() {
+  const set = getCurrentSet();
+  if (!set) {
+    alert('セットが選択されていません。');
+    return;
+  }
+
+  const tbody = document.querySelector('#videoTable tbody');
+  const rows = Array.from(tbody.rows);
+
+  const items = [];
+
+  rows.forEach(tr => {
+    const url = tr.cells[0].querySelector('input[type="text"]').value.trim();
+    const start = parseInt(tr.cells[1].querySelector('input[type="number"]').value || '0', 10) || 0;
+    if (!url) return; // 空行は無視
+    items.push({ url, startSeconds: start });
+  });
+
+  set.items = items;
+  alert('選択中セットを更新しました。');
+}
+
+// 新規セット追加
+function addNewSet() {
+  const name = prompt('新しいセット名を入力してください。', '新しいセット');
+  if (!name) return;
+
+  // 簡易的なID生成
+  const id = 'set_' + Date.now();
+
+  configData.sets.push({
+    id,
+    name,
+    items: []
+  });
+  currentSetId = id;
+  refreshSetSelectOptions();
+  applyCurrentSetToTable();
+}
+
+// セット削除
+function deleteCurrentSet() {
+  const set = getCurrentSet();
+  if (!set) {
+    alert('削除するセットがありません。');
+    return;
+  }
+  if (!confirm(`セット「${set.name}」を削除しますか？`)) return;
+
+  configData.sets = configData.sets.filter(s => s.id !== set.id);
+  currentSetId = null;
+  refreshSetSelectOptions();
+  // テーブルも初期化
+  const tbody = document.querySelector('#videoTable tbody');
+  tbody.innerHTML = `
+    <tr>
+      <td><input type="text" placeholder="https://www.youtube.com/watch?v=XXXXX など"></td>
+      <td><input type="number" min="0" value="0"></td>
+      <td><button type="button" class="removeRow">×</button></td>
+    </tr>
+  `;
+}
+
+// 設定ファイル読み込み
+document.getElementById('loadConfigFile').addEventListener('click', () => {
+  const input = document.getElementById('configFileInput');
+  if (!input.files || input.files.length === 0) {
+    alert('読み込む設定ファイルを選択してください。');
+    return;
+  }
+  const file = input.files[0];
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const obj = JSON.parse(e.target.result);
+      if (!obj.sets || !Array.isArray(obj.sets)) {
+        throw new Error('不正な設定ファイル形式です。');
+      }
+      configData = obj;
+      currentSetId = null;
+      refreshSetSelectOptions();
+      alert('設定ファイルを読み込みました。セットを選択してください。');
+    } catch (err) {
+      console.error(err);
+      alert('設定ファイルの読み込みに失敗しました。');
+    }
+  };
+  reader.readAsText(file, 'utf-8');
+});
+
+// 設定ファイル保存
+document.getElementById('saveConfigFile').addEventListener('click', () => {
+  const json = JSON.stringify(configData, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'youtube_sets.json';
+  a.click();
+
+  URL.revokeObjectURL(url);
+});
+
+// セット選択変更
+document.getElementById('setSelect').addEventListener('change', (e) => {
+  currentSetId = e.target.value;
+});
+
+// ボタンに関数をバインド
+document.getElementById('addSet').addEventListener('click', addNewSet);
+document.getElementById('deleteSet').addEventListener('click', deleteCurrentSet);
+document.getElementById('applySetToTable').addEventListener('click', applyCurrentSetToTable);
+document.getElementById('updateSetFromTable').addEventListener('click', updateCurrentSetFromTable);
+</script>
+
+<script>
+// 全体の開始を何秒戻すかを取得（負の値や未入力は 0 扱い）
+function getGlobalOffsetSeconds() {
+  const input = document.getElementById('globalOffset');
+  if (!input) return 0;
+
+  const val = parseInt(input.value || '0', 10);
+  if (isNaN(val) || val < 0) return 0;
+
+  return val;
+}
+</script>
+
+
+</body>
+</html>
